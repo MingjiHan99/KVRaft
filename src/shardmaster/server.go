@@ -184,6 +184,18 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 	// Your code here.
+	sm.mu.Lock()
+	_, isLeader := sm.rf.GetState()
+	seq, ok := sm.clients[args.Id]
+	if isLeader && ok && args.SeqNum <= seq {
+		reply.Err = OK
+		reply.WrongLeader = false
+		DPrintf("Server %v replies client %v Move %v: success directly", sm.me, args.Id, args.SeqNum)
+		sm.mu.Unlock()
+		return 
+	}
+	sm.mu.Unlock()
+
 	op := Op {ClientID: args.Id,
 			SeqNum: args.SeqNum,
 			Type: OpType_Move,
@@ -231,6 +243,19 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 	// Your code here.
+
+	sm.mu.Lock()
+	_, isLeader := sm.rf.GetState()
+	seq, ok := sm.clients[args.Id]
+	if isLeader && ok && args.SeqNum <= seq {
+		reply.Err = OK
+		reply.WrongLeader = false
+		DPrintf("Server %v replies client %v Query %v: success directly", sm.me, args.Id, args.SeqNum)
+		sm.mu.Unlock()
+		return 
+	}
+	sm.mu.Unlock()
+
 	op := Op {
 		ClientID: args.Id,
 		SeqNum: args.SeqNum,
