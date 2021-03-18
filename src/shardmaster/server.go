@@ -7,7 +7,7 @@ import "sync"
 import "../labgob"
 import "log"
 import "time"
-const Debug = 0
+const Debug = 1
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -61,6 +61,93 @@ type Op struct {
 
 }
 
+func (sm *ShardMaster) rebalance(config *Config) {
+	gidArray := make([]int, 0)
+
+	for k, _ := range config.Groups {
+		gidArray = append(gidArray, k)
+	}
+
+	for i := 0; i < NShards; i++ {
+		config.Shards[i] = gidArray[i % len(gidArray)]
+	}
+}
+
+
+func (sm *ShardMaster) handleJoinOp (op *Op) {
+	
+	lastIndex := len(sm.configs) - 1
+	config := Config{}
+
+	config.Num = sm.configs[lastIndex].Num + 1
+	config.Groups = make(map[int][]string)
+	// add new group info
+	for k, v := range sm.configs[lastIndex].Groups {
+		config.Groups[k] = v
+	}
+
+	for k, v := range op.JoinServers {
+		config.Groups[k] = v
+	}
+
+	sm.rebalance(&config)
+	
+	sm.configs = append(sm.configs, config)
+
+	// new shard info
+}
+
+func (sm *ShardMaster) handleLeaveOp (op *Op) {
+	lastIndex := len(sm.configs) - 1
+	config := Config{}
+
+	config.Num = sm.configs[lastIndex].Num + 1
+	config.Groups = make(map[int][]string)
+	// add new group info
+	for k, v := range sm.configs[lastIndex].Groups {
+		config.Groups[k] = v
+	}
+
+	for _, v := range op.LeaveGIDs {
+		delete(config.Groups, v)
+	}
+    if len(config.Groups) > 0 {
+		sm.rebalance(&config)
+	}
+
+	
+	sm.configs = append(sm.configs, config)
+
+}
+
+func (sm *ShardMaster) handleMoveOp (op *Op) {
+	lastIndex := len(sm.configs) - 1
+	config := Config{}
+
+	config.Num = sm.configs[lastIndex].Num + 1
+	config.Groups = make(map[int][]string)
+	// add new group info
+	for k, v := range sm.configs[lastIndex].Groups {
+		config.Groups[k] = v
+	}
+
+	for i, v := range sm.configs[lastIndex].Shards {
+		config.Shards[i] = v
+	}
+
+	config.Shards[op.MoveShard] = op.MoveGID
+
+}
+
+func (sm *ShardMaster) handleQueryOp (op *Op) {
+
+	if op.QueryNum == -1 {
+		op.QueryConfig = sm.configs[len(sm.configs) - 1]
+	} else {
+		op.QueryConfig = sm.configs[op.QueryNum]
+	}
+
+}
 
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// where the seq < maxseq
@@ -320,21 +407,6 @@ func (sm *ShardMaster) Raft() *raft.Raft {
 	return sm.rf
 }
 
-func (sm *ShardMaster) handleJoinOp (op *Op) {
-	
-}
-
-func (sm *ShardMaster) handleLeaveOp (op *Op) {
-	
-}
-
-func (sm *ShardMaster) handleMoveOp (op *Op) {
-
-}
-
-func (sm *ShardMaster) handleQueryOp (op *Op) {
-
-}
 
 func (sm *ShardMaster) applyLog() {
 	for !sm.killed {
@@ -391,14 +463,19 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 
 	sm.configs = make([]Config, 1)
 	sm.configs[0].Groups = map[int][]string{}
-
+	sm.configs[0].Num = 0
 	labgob.Register(Op{})
+	DPrintf("Make channel")
 	sm.applyCh = make(chan raft.ApplyMsg)
-	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
+	DPrintf("Make channel done")
 
+	DPrintf("Make raft")
+	sm.rf = raft.Make(servers, me, persister, sm.applyCh)
+	DPrintf("Make raft done")
 	sm.clients = make(map[int64]int64)
 	sm.channels = make(map[int]chan Op)
 
+	DPrintf("Server %v starts", sm.me)
 	// Your code here.
 	go sm.applyLog()
 	return sm

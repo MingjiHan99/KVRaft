@@ -189,6 +189,12 @@ func (rf *Raft) readSnapshot() {
 
 }
 
+func (rf *Raft) GetSnapshot() ([]byte, int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	
+	return rf.persister.ReadSnapshot(), rf.lastIncludedIndex
+}
 
 //
 // example RequestVote RPC arguments structure.
@@ -960,7 +966,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// initialize from state persisted before a crash*/
 	DPrintf("Instance %v starts the main loop, timeout limit: %v", rf.me ,rf.timeout)
 	rf.readPersist(persister.ReadRaftState())
-	rf.readSnapshot()
+//	rf.readSnapshot()
 	go rf.mainLoop()
 	go rf.applyLog()
 

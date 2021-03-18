@@ -250,12 +250,29 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.clients = make(map[int64]int64)
 	kv.channels = make(map[int]chan Op)
 	kv.lastApplied = 0
+	kv.readSnapshotForInit()
+	
 	// You may need initialization code here.
 	if kv.maxraftstate != -1 {
 		go kv.doSnapshot()
 	}
 	go kv.processLog()
 	return kv
+}
+
+func (kv *KVServer) readSnapshotForInit() {
+	snapshot, lastIncludedIndex := kv.rf.GetSnapshot()
+	if snapshot != nil && len(snapshot) >= 1 {
+		r := bytes.NewBuffer(snapshot)
+		d := labgob.NewDecoder(r)
+
+		if d.Decode(&kv.db) != nil ||
+			d.Decode(&kv.clients) != nil {
+			log.Fatalf("Unable to read persisted snapshot")
+		}
+
+		kv.lastApplied = lastIncludedIndex
+	}
 }
 
 func (kv *KVServer) doSnapshot() {

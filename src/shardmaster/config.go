@@ -4,7 +4,7 @@ import "../labrpc"
 import "../raft"
 import "testing"
 import "os"
-
+import "fmt"
 // import "log"
 import crand "crypto/rand"
 import "math/rand"
@@ -285,7 +285,6 @@ func (cfg *config) StartServer(i int) {
 	}
 
 	cfg.mu.Unlock()
-
 	cfg.servers[i] = StartServer(ends, i, cfg.saved[i])
 
 	kvsvc := labrpc.MakeService(cfg.servers[i])
@@ -341,12 +340,12 @@ func make_config(t *testing.T, n int, unreliable bool) *config {
 	cfg.clerks = make(map[*Clerk][]string)
 	cfg.nextClientId = cfg.n + 1000 // client ids start 1000 above the highest serverid
 	cfg.start = time.Now()
-
+	fmt.Println("Init?")
 	// create a full set of KV servers.
 	for i := 0; i < cfg.n; i++ {
 		cfg.StartServer(i)
 	}
-
+	fmt.Println("Started?")
 	cfg.ConnectAll()
 
 	cfg.net.Reliable(!unreliable)
