@@ -7,7 +7,8 @@ import "sync"
 import "../labgob"
 import "log"
 import "time"
-const Debug = 1
+import "sort"
+const Debug = 0
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -67,10 +68,15 @@ func (sm *ShardMaster) rebalance(config *Config) {
 	for k, _ := range config.Groups {
 		gidArray = append(gidArray, k)
 	}
-
-	for i := 0; i < NShards; i++ {
-		config.Shards[i] = gidArray[i % len(gidArray)]
+	sort.Ints(gidArray) 
+	if len(gidArray) > 0 {
+		for i := 0; i < NShards; i++ {
+			config.Shards[i] = gidArray[i % len(gidArray)]
+		}
+	} else {
+		config.Shards = [NShards]int{}
 	}
+	
 }
 
 
@@ -111,10 +117,8 @@ func (sm *ShardMaster) handleLeaveOp (op *Op) {
 	for _, v := range op.LeaveGIDs {
 		delete(config.Groups, v)
 	}
-    if len(config.Groups) > 0 {
-		sm.rebalance(&config)
-	}
 
+	sm.rebalance(&config)
 	
 	sm.configs = append(sm.configs, config)
 
@@ -130,21 +134,31 @@ func (sm *ShardMaster) handleMoveOp (op *Op) {
 	for k, v := range sm.configs[lastIndex].Groups {
 		config.Groups[k] = v
 	}
-
+ 
 	for i, v := range sm.configs[lastIndex].Shards {
 		config.Shards[i] = v
 	}
 
 	config.Shards[op.MoveShard] = op.MoveGID
-
+	sm.configs = append(sm.configs, config)
 }
 
 func (sm *ShardMaster) handleQueryOp (op *Op) {
 
-	if op.QueryNum == -1 {
+	if op.QueryNum == -1 || op.QueryNum > sm.configs[len(sm.configs) - 1].Num {
 		op.QueryConfig = sm.configs[len(sm.configs) - 1]
 	} else {
-		op.QueryConfig = sm.configs[op.QueryNum]
+	/*	fmt.Printf("Config nums: ")
+		for i := 0; i < len(sm.configs); i++ {
+			fmt.Printf("%v ", sm.configs[i].Num)
+		}
+		fmt.Println()*/
+		for i := 0; i < len(sm.configs); i++ {
+			if sm.configs[i].Num == op.QueryNum {
+				op.QueryConfig = sm.configs[i]
+				break
+			}
+		}
 	}
 
 }

@@ -88,7 +88,6 @@ func TestBasic(t *testing.T) {
 
 	cfa := make([]Config, 6)
 	cfa[0] = ck.Query(-1)
-
 	check(t, []int{}, ck)
 
 	var gid1 int = 1
