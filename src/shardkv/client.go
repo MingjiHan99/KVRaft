@@ -7,7 +7,7 @@ package shardkv
 // the assignment of shards (keys) to groups, and then
 // talks to the group that holds the key's shard.
 //
-
+import "sync"
 import "../labrpc"
 import "crypto/rand"
 import "math/big"
@@ -40,6 +40,9 @@ type Clerk struct {
 	config   shardmaster.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	seqNumber int64
+	id int64
+	mu sync.Mutex
 }
 
 //
@@ -55,10 +58,18 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck := new(Clerk)
 	ck.sm = shardmaster.MakeClerk(masters)
 	ck.make_end = make_end
+	ck.seqNumber = 0
+	ck.id = time.Now().UnixNano()
 	// You'll have to add code here.
 	return ck
 }
 
+func (ck *Clerk) GetSeqNumber() int64 {
+	ck.mu.Lock()
+	defer ck.mu.Unlock()
+	ck.seqNumber += 1
+	return ck.seqNumber
+}
 //
 // fetch the current value for a key.
 // returns "" if the key does not exist.
@@ -68,6 +79,8 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.Id = ck.id
+    args.SeqNum = ck.GetSeqNumber()    
 
 	for {
 		shard := key2shard(key)
@@ -104,6 +117,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
+	args.Id = ck.id
+    args.SeqNum = ck.GetSeqNumber()    
 
 
 	for {
