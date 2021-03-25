@@ -1,7 +1,7 @@
 package shardkv
 
 
-// import "../shardmaster"
+import "../shardmaster"
 import "../labrpc"
 import "../raft"
 import "sync"
@@ -10,6 +10,7 @@ import "time"
 import "log"
 import "bytes"
 import "sync/atomic"
+import "fmt"
 const Debug = 0
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
@@ -24,6 +25,7 @@ const (
 	KvOp_Get KvOp = 0
 	KvOp_Put KvOp = 1
 	KvOp_Append KvOp = 2
+	KvOp_Config KvOp = 3
 )
 type Op struct {
 	// Your definitions here.
@@ -35,6 +37,8 @@ type Op struct {
 	Id int64
 	SeqNum int64
 	Err Err
+
+	Config shardmaster.Config
 }
 
 
@@ -56,6 +60,12 @@ type ShardKV struct {
 	channels map[int]chan Op
 	// clients sequence number
 	clients map[int64]int64 
+	configs []shardmaster.Config
+	pdclient *shardmaster.Clerk
+}
+// use it with lock, be careful :)
+func (kv *ShardKV) lastestConfig() shardmaster.Config {
+	return kv.configs[len(kv.configs) - 1]
 }
 
 
@@ -267,11 +277,17 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.clients = make(map[int64]int64)
 	kv.channels = make(map[int]chan Op)
 	kv.lastApplied = 0
+	kv.configs = make([]shardmaster.Config, 1)
+	kv.configs[0].Groups = map[int][]string{}
+	kv.configs[0].Num = 0
+	kv.pdclient = shardmaster.MakeClerk(kv.masters)
 	kv.readSnapshotForInit()
+
 
 	if kv.maxraftstate != -1 {
 		go kv.doSnapshot()
 	}
+	go kv.pullConfig()
 	go kv.processLog()
 
 	return kv
@@ -289,6 +305,24 @@ func (kv *ShardKV) readSnapshotForInit() {
 		}
 
 		kv.lastApplied = lastIncludedIndex
+	}
+}
+
+func (kv *ShardKV) pullConfig() {
+	for !kv.killed() {
+		//only leader can take the configuration
+	    if _, isLeader := kv.rf.GetState(); isLeader {
+			nextNum := kv.lastestConfig().Num + 1
+			cfg := kv.pdclient.Query(nextNum)
+			if cfg.Num == nextNum {
+				op := Op {
+					OpType: KvOp_Config,
+					Config: cfg }
+				kv.rf.Start(op)
+			}
+		}
+
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -351,6 +385,11 @@ func (kv *ShardKV) processLog() {
 					
 							}
 
+						}
+						case KvOp_Config: {
+							if op.Config.Num == kv.lastestConfig().Num +  1 {
+								kv.configs = append(kv.configs, op.Config)
+							}
 						}
 					}
 					kv.clients[op.Id] = op.SeqNum
