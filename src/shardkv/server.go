@@ -10,8 +10,7 @@ import "time"
 import "log"
 import "bytes"
 import "sync/atomic"
-//import "fmt"
-const Debug = 0
+const Debug = 1
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
 		log.Printf(format, a...)
@@ -26,6 +25,7 @@ const (
 	KvOp_Put KvOp = 1
 	KvOp_Append KvOp = 2
 	KvOp_Config KvOp = 3
+	KvOp_Migration KvOp = 4
 )
 type Op struct {
 	// Your definitions here.
@@ -38,6 +38,7 @@ type Op struct {
 	SeqNum int64
 	Err Err
 
+	MigrationReply GetMigrationReply
 	Config shardmaster.Config
 }
 
@@ -55,16 +56,26 @@ type ShardKV struct {
 	// Your definitions here.
 	dead    int32 
 	lastApplied int
-	db map[string]string
+	db  [shardmaster.NShards]map[string]string
 	// Key: index Value: op
 	channels map[int]chan Op
 	// clients sequence number
-	clients map[int64]int64 
+	clients [shardmaster.NShards]map[int64]int64 
 	configs []shardmaster.Config
+	oldConfig shardmaster.Config
 	pdclient *shardmaster.Clerk
+
+	availableShards map[int]bool
+	oldshards map[int]map[int]bool
+
+	requiredShards map[int]bool
+	// config id -> shard id -> data
+	oldshardsData map[int]map[int]map[string]string
+	// config id -> shard id -> seq
+	oldshardsSeq map[int]map[int]map[int64]int64
 }
 // use it with lock, be careful :)
-func (kv *ShardKV) lastestConfig() shardmaster.Config {
+func (kv *ShardKV) latestConfig() shardmaster.Config {
 	return kv.configs[len(kv.configs) - 1]
 }
 
@@ -72,12 +83,21 @@ func (kv *ShardKV) lastestConfig() shardmaster.Config {
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	seq, ok := kv.clients[args.Id]
+	hashVal := key2shard(args.Key)
+
 	_, isLeader := kv.rf.GetState()
+	_, shardOk := kv.availableShards[hashVal]
+	if isLeader && !shardOk {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
+	
+	seq, ok := kv.clients[hashVal][args.Id]
 	if isLeader && ok && seq >= args.SeqNum {
 		DPrintf("Server %v replies client Get(%v) seq : %v arg seq: %v",
 				kv.me, args.Key, seq, args.SeqNum)
-		value, exists := kv.db[args.Key]
+		value, exists := kv.db[hashVal][args.Key]
 		if exists {
 			reply.Err = OK
 			reply.Value = value
@@ -110,14 +130,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		select {
 			case op := <- resChan: {
-				_, isLeader := kv.rf.GetState()
-				if isLeader {
-					reply.Err = op.Err
-					reply.Value = op.Value
-				} else {
-					reply.Err = ErrWrongLeader
-				}
-				
+				reply.Err = op.Err
+				reply.Value = op.Value
 				DPrintf("Server %v replies client Get(%v): %v ", kv.me, args.Key, reply.Err)
 			}
 			case <- time.After(time.Millisecond * 800): { 
@@ -138,15 +152,19 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	
-	DPrintf("Server %v get PutAppend Request", kv.me)
-
 	kv.mu.Lock()
-	DPrintf("Server %v get lock in PutAppend Request", kv.me)
+	
+	hashVal := key2shard(args.Key)
+
 	_, isLeader := kv.rf.GetState()
 
-	seq, ok := kv.clients[args.Id]
-	
+	_, shardOk := kv.availableShards[hashVal]
+	if isLeader && !shardOk {
+		reply.Err = ErrWrongGroup
+		kv.mu.Unlock()
+		return
+	}
+	seq, ok := kv.clients[hashVal][args.Id]
 	if isLeader && ok && seq >= args.SeqNum {
 		reply.Err = OK
 		DPrintf("Server replies client PutAppend(%v, %v): %v seq: %v arg seq: %v",
@@ -182,12 +200,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			case <- resChan: {
 				DPrintf("Server %v replies client PutAppend(%v, %v): %v",
 			 			kv.me, args.Key, args.Value, reply.Err)
-				_, isLeader := kv.rf.GetState()
-				if isLeader {
 					reply.Err = OK
-				} else {
-					reply.Err = ErrWrongLeader
-				}
 			}
 			case <- time.After(time.Millisecond * 800): { 
 				reply.Err = ErrWrongLeader
@@ -206,6 +219,38 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		DPrintf("Server %v is not leader now", kv.me)
 	}
 
+}
+
+// if the old shards has be processed
+// pulling shards from any server in a group is ok
+// asking leader is not a necessary thing
+func (kv *ShardKV) GetMigration(args *GetMigrationArgs, reply *GetMigrationReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	
+	if oldShards, versionOk := kv.oldshards[args.Num] ; versionOk {
+		if _, shardOk := oldShards[args.Shard]; shardOk {
+			
+			// config number -> shard number
+			reply.Data = make(map[string]string)
+			for k, v := range kv.oldshardsData[args.Num][args.Shard] {
+				reply.Data[k] = v
+			}
+
+			reply.Seq = make(map[int64]int64)
+			for k, v := range kv.oldshardsSeq[args.Num][args.Shard] {
+				reply.Seq[k] = v
+			}
+			
+			reply.Num = args.Num
+			reply.Shard = args.Shard
+			reply.Err = OK
+			return 
+		}
+	} 
+
+	reply.Err = ErrWrongGroup
+	
 }
 
 //
@@ -273,20 +318,32 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
-	kv.db = make(map[string]string)
-	kv.clients = make(map[int64]int64)
+
+	for i := 0; i < shardmaster.NShards; i++ {
+		kv.db[i] = make(map[string]string)
+		kv.clients[i] = make(map[int64]int64)
+	}
 	kv.channels = make(map[int]chan Op)
 	kv.lastApplied = 0
 	kv.configs = make([]shardmaster.Config, 1)
 	kv.configs[0].Groups = map[int][]string{}
 	kv.configs[0].Num = 0
 	kv.pdclient = shardmaster.MakeClerk(kv.masters)
+
+	kv.availableShards = make(map[int]bool)
+	kv.requiredShards = make(map[int]bool)
+
+	// we need to store all old data, and use gc RPC to clean them !!!!
+	kv.oldshards = make(map[int]map[int]bool)
+	kv.oldshardsSeq = make(map[int]map[int]map[int64]int64)
+	kv.oldshardsData = make(map[int]map[int]map[string]string)
 	kv.readSnapshotForInit()
 
 
 	if kv.maxraftstate != -1 {
 		go kv.doSnapshot()
 	}
+	go kv.pullShards()
 	go kv.pullConfig()
 	go kv.processLog()
 
@@ -312,17 +369,77 @@ func (kv *ShardKV) pullConfig() {
 	for !kv.killed() {
 		//only leader can take the configuration
 	    if _, isLeader := kv.rf.GetState(); isLeader {
-			nextNum := kv.lastestConfig().Num + 1
+			nextNum := kv.latestConfig().Num + 1
 			cfg := kv.pdclient.Query(nextNum)
-			if cfg.Num == nextNum {
+			kv.mu.Lock()
+			// first condition: add condition here to reduce useless log in Raft
+			// second condition: make sure the migration is completed one by one
+			if cfg.Num == kv.latestConfig().Num + 1 && len(kv.requiredShards) == 0 {
 				op := Op {
 					OpType: KvOp_Config,
 					Config: cfg }
 				kv.rf.Start(op)
 			}
+			kv.mu.Unlock()
 		}
 
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (kv *ShardKV) pullShards() {
+	for !kv.killed() {
+		//only leader can pull shards
+		kv.mu.Lock()
+	    if _, isLeader := kv.rf.GetState(); isLeader && len(kv.requiredShards) != 0 {
+			// make a wait group here
+			DPrintf("Pull shards start")
+			wg := sync.WaitGroup{}
+			wg.Add(len(kv.requiredShards))
+			for k, _ := range kv.requiredShards {
+				// TODO: add pull shards logic
+				go func (shard int) {
+					gid := kv.oldConfig.Shards[shard]
+					group := kv.oldConfig.Groups[gid]
+					for i := 0 ; i < len(group); i++ {
+						srv :=kv.make_end(group[i])
+						args := GetMigrationArgs{
+							Num: kv.oldConfig.Num,
+							Shard: shard}
+						
+						reply := GetMigrationReply{
+						}
+						reply.Data = make(map[string]string)
+						reply.Seq = make(map[int64]int64)
+						ok := srv.Call("ShardKV.GetMigration", &args, &reply)
+						
+						op := Op{
+							OpType: KvOp_Migration,
+							MigrationReply: reply }
+						
+						if ok && reply.Err == OK {
+							DPrintf("Server %v at group %v pull shards success %v config  %v ", 
+							kv.me, kv.gid, shard, kv.oldConfig.Num )
+							kv.rf.Start(op)
+							break
+						} else {
+							DPrintf("Server %v at group %v pull shards fail %v config  %v ", 
+							kv.me, kv.gid, shard, kv.oldConfig.Num )
+						}
+						
+					}
+					wg.Done()
+				}(k)
+				
+			}	
+			kv.mu.Unlock()
+			wg.Wait()
+			DPrintf("Pull shards done")
+			// waitgroup done
+		} else {
+			kv.mu.Unlock()
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
@@ -345,88 +462,239 @@ func (kv *ShardKV) doSnapshot() {
 	}
 }
 
+func (kv *ShardKV) applyConfig(op *Op, msg *raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	DPrintf("Server %v at group %v apply config %v", kv.me, kv.gid, op.Config.Num)
+	// apply config one by one
+	
+	if op.Config.Num == kv.latestConfig().Num + 1 {
+
+		if op.Config.Num == 1 {
+			kv.oldConfig =  kv.latestConfig()	
+			kv.configs = append(kv.configs, op.Config)
+			newConfig := kv.latestConfig()	
+			for i := 0; i < shardmaster.NShards; i++ {
+				if newConfig.Shards[i] == kv.gid {
+					kv.availableShards[i] = true
+				}
+			}
+		} else {
+			kv.oldConfig =  kv.latestConfig()	
+			kv.requiredShards = make(map[int]bool)
+
+			kv.configs = append(kv.configs, op.Config)
+			newConfig := kv.latestConfig()	
+			// use temp variable
+			availableShards := make(map[int]bool)
+
+			// old configuration matches required shards
+			// how to manage pull data progress?
+			kv.oldshards[kv.oldConfig.Num] = make(map[int]bool)
+			kv.oldshardsSeq[kv.oldConfig.Num] = make(map[int]map[int64]int64)
+			kv.oldshardsData[kv.oldConfig.Num] = make(map[int]map[string]string)
+			// we don't need do rebalance for the first config
+		
+			// divide current data into three parts:
+			// oldshards, requiredshards and db 
+			for i := 0; i < shardmaster.NShards; i++ {
+				if newConfig.Shards[i] == kv.gid {
+					// if the shards i serve does not exist, i need it
+					if _, ok := kv.availableShards[i]; !ok {
+					//	DPrintf("Server %v at group %v need: %v",  kv.me, kv.gid, i)
+						kv.requiredShards[i] = true	
+					} else {
+						// otherwise i can still serve it
+					//	DPrintf("Server %v at group %v still available: %v",  kv.me, kv.gid, i)
+						availableShards[i] = true
+						delete(kv.availableShards, i)
+					}
+				}
+			}		
+			// old shards
+			// I am not responsible for those shards anymore.
+			for shard, _ := range kv.availableShards {
+				kv.oldshards[kv.oldConfig.Num][shard] = true
+				kv.oldshardsData[kv.oldConfig.Num][shard] = make(map[string]string)
+				kv.oldshardsSeq[kv.oldConfig.Num][shard] = make(map[int64]int64)
+			}
+			// update old shards data and user request id
+			for shard, _ := range kv.oldshards[kv.oldConfig.Num] {
+				// get old data		
+				// use deep copy
+				for k, v := range kv.db[shard] {
+					kv.oldshardsData[kv.oldConfig.Num][shard][k] = v
+				}  
+				// clean data
+				// let gc recycles data
+				kv.db[shard] = make(map[string]string)
+				// get old seq number
+				// use deep copy
+				for k, v := range kv.clients[shard] {
+					kv.oldshardsSeq[kv.oldConfig.Num][shard][k] = v
+				}  
+				// clean seq
+				// let gc recycles data
+				kv.clients[shard] = make(map[int64]int64)
+			}
+			
+			// update the new available shards
+			kv.availableShards = availableShards
+
+			
+		}
+		
+	} 
+	// remeber to update the lastapplied index :)
+	if kv.lastApplied < msg.CommandIndex {
+		kv.lastApplied = msg.CommandIndex
+	}
+}
+
+func (kv *ShardKV) applyMigration(op *Op, msg *raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	DPrintf("Server %v at %v receives shard %v at config %v", kv.me, kv.gid, op.MigrationReply.Shard, op.MigrationReply.Num)
+	if op.MigrationReply.Num != kv.oldConfig.Num {
+		panic("migration mismatch!")
+	}
+	// make shard available
+	delete(kv.requiredShards, op.MigrationReply.Shard)
+	kv.availableShards[op.MigrationReply.Shard] = true
+	
+	kv.db[op.MigrationReply.Shard] = make(map[string]string)
+	for k, v := range op.MigrationReply.Data {
+		kv.db[op.MigrationReply.Shard][k] = v
+	}
+
+
+	kv.clients[op.MigrationReply.Shard] = make(map[int64]int64)
+	for k, v := range op.MigrationReply.Seq {
+		kv.clients[op.MigrationReply.Shard][k] = v
+	}
+
+	if kv.lastApplied < msg.CommandIndex {
+		kv.lastApplied = msg.CommandIndex
+	}
+}
+
+func (kv *ShardKV) applyGarbageCollection() {
+	// TODO
+}
+
+func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
+	kv.mu.Lock()
+	
+	hashVal := key2shard(op.Key)
+	
+	_, shardOk := kv.availableShards[hashVal]
+	// check the shard first
+	if !shardOk {
+		op.Err = ErrWrongGroup
+		ch, ok := kv.channels[msg.CommandIndex]
+		delete(kv.channels, msg.CommandIndex)
+
+		kv.mu.Unlock()
+		_, isLeader := kv.rf.GetState()
+		if ok && isLeader {
+			ch <- *op
+		}
+		return 
+	}
+	
+	seq, seqExists := kv.clients[hashVal][op.Id]
+	// check seqnumber
+	if !seqExists || seq < op.SeqNum {
+		DPrintf("Server %v applied log at index %v.", kv.me, msg.CommandIndex)
+		switch op.OpType {
+			case KvOp_Put: {
+				kv.db[hashVal][op.Key] = op.Value
+				DPrintf("Op seq value:%v PUT(%v, %v)", op.SeqNum, op.Key, op.Value)
+			}
+			case KvOp_Get: {
+				val, exists := kv.db[hashVal][op.Key]
+				if exists {
+					op.Err = OK
+					op.Value = val
+				} else {
+					op.Err = ErrNoKey
+				}
+				DPrintf("Op seq value:%v Get(%v, %v) Err (%v)", op.SeqNum, op.Key, op.Value, op.Err)
+		
+			}
+			case KvOp_Append: {
+				val, exists := kv.db[hashVal][op.Key]
+				if exists {
+		
+					kv.db[hashVal][op.Key] = val + op.Value
+					DPrintf("Op seq value:%v Append(%v, %v -> %v) Err (%v)", op.SeqNum, op.Key, val, kv.db[hashVal][op.Key] , op.Err)
+		
+				} else {
+					kv.db[hashVal][op.Key] = op.Value
+					DPrintf("Op seq value:%v Append(%v, %v) Err (%v)", op.SeqNum, op.Key, kv.db[hashVal][op.Key] , op.Err)
+		
+				}
+
+			}
+		}
+		kv.clients[hashVal][op.Id] = op.SeqNum
+	
+		ch, ok := kv.channels[msg.CommandIndex]
+		
+		delete(kv.channels, msg.CommandIndex)
+
+		if kv.lastApplied < msg.CommandIndex {
+			kv.lastApplied = msg.CommandIndex
+		}
+
+		kv.mu.Unlock()
+	
+		_, isLeader := kv.rf.GetState()
+		if ok && isLeader {
+			ch <- *op
+		}
+		return 
+		
+	} 
+	
+	kv.mu.Unlock()
+	
+}
+
+func (kv *ShardKV) applySnapshot(msg *raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	DPrintf("Server %v applied snapshot from %v to %v", kv.me, kv.lastApplied, msg.LastIncludedIndex)
+	r := bytes.NewBuffer(msg.Command.([]byte))
+	d := labgob.NewDecoder(r)
+
+	if d.Decode(&kv.db) != nil ||
+		d.Decode(&kv.clients) != nil {
+		log.Fatalf("Unable to read persisted snapshot")
+	}
+	kv.lastApplied = msg.LastIncludedIndex
+}
+
 func (kv *ShardKV) processLog() {
 	for !kv.killed() {
 		msg := <- kv.applyCh
-		kv.mu.Lock()
-			if msg.CommandValid {
-				op := msg.Command.(Op)
-				
-				seq, seqExists := kv.clients[op.Id]
-				
-				if !seqExists || seq < op.SeqNum {
-					DPrintf("Server %v applied log at index %v.", kv.me, msg.CommandIndex)
-					switch op.OpType {
-						case KvOp_Put: {
-							kv.db[op.Key] = op.Value
-							DPrintf("Op seq value:%v PUT(%v, %v)", op.SeqNum, op.Key, op.Value)
-						}
-						case KvOp_Get: {
-							val, exists := kv.db[op.Key]
-							if exists {
-								op.Err = OK
-								op.Value = val
-							} else {
-								op.Err = ErrNoKey
-							}
-							DPrintf("Op seq value:%v Get(%v, %v) Err (%v)", op.SeqNum, op.Key, op.Value, op.Err)
-					
-						}
-						case KvOp_Append: {
-							val, exists := kv.db[op.Key]
-							if exists {
-					
-								kv.db[op.Key] = val + op.Value
-								DPrintf("Op seq value:%v Append(%v, %v -> %v) Err (%v)", op.SeqNum, op.Key, val, kv.db[op.Key] , op.Err)
-					
-							} else {
-								kv.db[op.Key] = op.Value
-								DPrintf("Op seq value:%v Append(%v, %v) Err (%v)", op.SeqNum, op.Key, kv.db[op.Key] , op.Err)
-					
-							}
-
-						}
-						case KvOp_Config: {
-							if op.Config.Num == kv.lastestConfig().Num +  1 {
-								kv.configs = append(kv.configs, op.Config)
-							}
-						}
-					}
-					kv.clients[op.Id] = op.SeqNum
-				
-					ch, ok := kv.channels[msg.CommandIndex]
-					
-					delete(kv.channels, msg.CommandIndex)
-
-					if kv.lastApplied < msg.CommandIndex {
-						kv.lastApplied = msg.CommandIndex
-					}
-
-					kv.mu.Unlock()
-				
-					_, isLeader := kv.rf.GetState()
-					if ok && isLeader {
-						ch <- op
-					}
-					
-				} else {
-					kv.mu.Unlock()
-				}
-
-			} else if msg.LastIncludedIndex > kv.lastApplied {
-				DPrintf("Server %v applied snapshot from %v to %v", kv.me, kv.lastApplied, msg.LastIncludedIndex)
-				r := bytes.NewBuffer(msg.Command.([]byte))
-				d := labgob.NewDecoder(r)
-
-				if d.Decode(&kv.db) != nil ||
-					d.Decode(&kv.clients) != nil {
-					log.Fatalf("Unable to read persisted snapshot")
-				}
-				kv.lastApplied = msg.LastIncludedIndex
-				kv.mu.Unlock()
-			} else {
-				kv.mu.Unlock()
+		
+		if msg.CommandValid {
+			op := msg.Command.(Op)
+			switch op.OpType {
+				case KvOp_Config:
+					kv.applyConfig(&op , &msg)
+				case KvOp_Migration:
+					kv.applyMigration(&op, &msg)
+				default:
+					kv.applyUserRequest(&op, &msg)
 			}
+
+		} else if msg.LastIncludedIndex > kv.lastApplied {
+			kv.applySnapshot(&msg)
+		} 
 				
-		}
+	}
 }

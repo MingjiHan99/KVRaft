@@ -46,3 +46,16 @@ type GetReply struct {
 	Err   Err
 	Value string
 }
+
+type GetMigrationArgs struct {
+	Num int // configuration number
+	Shard int // shard number
+}
+
+type GetMigrationReply struct {
+	Num int // configuration number
+	Shard int // shard number
+	Data map[string]string
+	Seq map[int64]int64
+	Err Err
+}
