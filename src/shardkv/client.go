@@ -41,8 +41,8 @@ type Clerk struct {
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
 	seqNumber int64
-	id int64
-	mu sync.Mutex
+	id        int64
+	mu        sync.Mutex
 }
 
 //
@@ -70,6 +70,7 @@ func (ck *Clerk) GetSeqNumber() int64 {
 	ck.seqNumber += 1
 	return ck.seqNumber
 }
+
 //
 // fetch the current value for a key.
 // returns "" if the key does not exist.
@@ -80,7 +81,7 @@ func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
 	args.Id = ck.id
-    args.SeqNum = ck.GetSeqNumber()    
+	args.SeqNum = ck.GetSeqNumber()
 
 	for {
 		shard := key2shard(key)
@@ -118,8 +119,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Value = value
 	args.Op = op
 	args.Id = ck.id
-    args.SeqNum = ck.GetSeqNumber()    
-
+	args.SeqNum = ck.GetSeqNumber()
 
 	for {
 		shard := key2shard(key)
