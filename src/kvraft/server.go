@@ -99,13 +99,8 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Unlock()
 		select {
 			case op := <- resChan: {
-				_, isLeader := kv.rf.GetState()
-				if isLeader {
-					reply.Err = op.Err
-					reply.Value = op.Value
-				} else {
-					reply.Err = ErrWrongLeader
-				}
+				reply.Err = op.Err
+				reply.Value = op.Value
 				
 				DPrintf("Server %v replies client Get(%v): %v ", kv.me, args.Key, reply.Err)
 			}
@@ -171,12 +166,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			case <- resChan: {
 				DPrintf("Server %v replies client PutAppend(%v, %v): %v",
 			 			kv.me, args.Key, args.Value, reply.Err)
-				_, isLeader := kv.rf.GetState()
-				if isLeader {
-					reply.Err = OK
-				} else {
-					reply.Err = ErrWrongLeader
-				}
+					reply.Err = op.Err
 			}
 			case <- time.After(time.Millisecond * 800): { 
 				reply.Err = ErrWrongLeader
@@ -307,6 +297,7 @@ func (kv *KVServer) processLog() {
 					switch op.OpType {
 						case KvOp_Put: {
 							kv.db[op.Key] = op.Value
+							op.Err = OK
 							DPrintf("Op seq value:%v PUT(%v, %v)", op.SeqNum, op.Key, op.Value)
 						}
 						case KvOp_Get: {
@@ -332,7 +323,7 @@ func (kv *KVServer) processLog() {
 								DPrintf("Op seq value:%v Append(%v, %v) Err (%v)", op.SeqNum, op.Key, kv.db[op.Key] , op.Err)
 					
 							}
-
+							op.Err = OK
 						}
 					}
 					kv.clients[op.Id] = op.SeqNum

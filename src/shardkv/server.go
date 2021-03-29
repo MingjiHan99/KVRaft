@@ -83,8 +83,8 @@ func (kv *ShardKV) latestConfig() shardmaster.Config {
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	kv.mu.Lock()
-	hashVal := key2shard(args.Key)
 
+	hashVal := key2shard(args.Key)
 	_, isLeader := kv.rf.GetState()
 	_, shardOk := kv.availableShards[hashVal]
 	if isLeader && !shardOk {
@@ -152,10 +152,10 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
 	kv.mu.Lock()
 	
 	hashVal := key2shard(args.Key)
-
 	_, isLeader := kv.rf.GetState()
 
 	_, shardOk := kv.availableShards[hashVal]
@@ -357,7 +357,15 @@ func (kv *ShardKV) readSnapshotForInit() {
 		d := labgob.NewDecoder(r)
 
 		if d.Decode(&kv.db) != nil ||
-			d.Decode(&kv.clients) != nil {
+			d.Decode(&kv.clients) != nil ||
+		d.Decode(&kv.configs) != nil || 
+		d.Decode(&kv.oldConfig) != nil ||
+		d.Decode(&kv.availableShards) != nil ||
+		d.Decode(&kv.oldshards) != nil ||
+		d.Decode(&kv.requiredShards) != nil ||
+		d.Decode(&kv.oldshardsData) != nil ||
+		d.Decode(&kv.oldshardsSeq) != nil {
+
 			log.Fatalf("Unable to read persisted snapshot")
 		}
 
@@ -390,9 +398,11 @@ func (kv *ShardKV) pullConfig() {
 func (kv *ShardKV) pullShards() {
 	for !kv.killed() {
 		//only leader can pull shards
+	    _, isLeader := kv.rf.GetState()
 		kv.mu.Lock()
-	    if _, isLeader := kv.rf.GetState(); isLeader && len(kv.requiredShards) != 0 {
+		if isLeader && len(kv.requiredShards) != 0 {
 			// make a wait group here
+			
 			DPrintf("Pull shards start")
 			wg := sync.WaitGroup{}
 			wg.Add(len(kv.requiredShards))
@@ -452,6 +462,13 @@ func (kv *ShardKV) doSnapshot() {
 			e := labgob.NewEncoder(w)
 			e.Encode(kv.db)
 			e.Encode(kv.clients)
+			e.Encode(kv.configs)
+			e.Encode(kv.oldConfig)
+			e.Encode(kv.availableShards)
+			e.Encode(kv.oldshards)
+			e.Encode(kv.requiredShards)
+			e.Encode(kv.oldshardsData)
+			e.Encode(kv.oldshardsSeq)
 			data := w.Bytes()
 			lastApplied := kv.lastApplied
 			kv.mu.Unlock()
@@ -469,7 +486,7 @@ func (kv *ShardKV) applyConfig(op *Op, msg *raft.ApplyMsg) {
 	DPrintf("Server %v at group %v apply config %v", kv.me, kv.gid, op.Config.Num)
 	// apply config one by one
 	
-	if op.Config.Num == kv.latestConfig().Num + 1 {
+	if op.Config.Num == kv.latestConfig().Num + 1 && len(kv.requiredShards) == 0 {
 
 		if op.Config.Num == 1 {
 			kv.oldConfig =  kv.latestConfig()	
@@ -556,7 +573,7 @@ func (kv *ShardKV) applyMigration(op *Op, msg *raft.ApplyMsg) {
 	defer kv.mu.Unlock()
 	DPrintf("Server %v at %v receives shard %v at config %v", kv.me, kv.gid, op.MigrationReply.Shard, op.MigrationReply.Num)
 	if op.MigrationReply.Num != kv.oldConfig.Num {
-		panic("migration mismatch!")
+		return 
 	}
 	// make shard available
 	delete(kv.requiredShards, op.MigrationReply.Shard)
@@ -645,27 +662,22 @@ func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
 			}
 		}
 		kv.clients[hashVal][op.Id] = op.SeqNum
-	
 		ch, ok := kv.channels[msg.CommandIndex]
-		
 		delete(kv.channels, msg.CommandIndex)
 
 		if kv.lastApplied < msg.CommandIndex {
 			kv.lastApplied = msg.CommandIndex
 		}
 
-		kv.mu.Unlock()
-	
+        kv.mu.Unlock()
+
 		_, isLeader := kv.rf.GetState()
 		if ok && isLeader {
 			ch <- *op
 		}
 		return 
-		
-	} 
-	
-	kv.mu.Unlock()
-	
+	} 	
+	kv.mu.Unlock()	
 }
 
 func (kv *ShardKV) applySnapshot(msg *raft.ApplyMsg) {
@@ -677,7 +689,15 @@ func (kv *ShardKV) applySnapshot(msg *raft.ApplyMsg) {
 	d := labgob.NewDecoder(r)
 
 	if d.Decode(&kv.db) != nil ||
-		d.Decode(&kv.clients) != nil {
+		d.Decode(&kv.clients) != nil ||
+		d.Decode(&kv.configs) != nil || 
+		d.Decode(&kv.oldConfig) != nil ||
+		d.Decode(&kv.availableShards) != nil ||
+		d.Decode(&kv.oldshards) != nil ||
+		d.Decode(&kv.requiredShards) != nil ||
+		d.Decode(&kv.oldshardsData) != nil ||
+		d.Decode(&kv.oldshardsSeq) != nil {
+
 		log.Fatalf("Unable to read persisted snapshot")
 	}
 	kv.lastApplied = msg.LastIncludedIndex
