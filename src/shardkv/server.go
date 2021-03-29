@@ -10,7 +10,7 @@ import "time"
 import "log"
 import "bytes"
 import "sync/atomic"
-const Debug = 1
+const Debug = 0
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
 		log.Printf(format, a...)
@@ -200,7 +200,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 			case <- resChan: {
 				DPrintf("Server %v replies client PutAppend(%v, %v): %v",
 			 			kv.me, args.Key, args.Value, reply.Err)
-					reply.Err = OK
+					reply.Err = op.Err
 			}
 			case <- time.After(time.Millisecond * 800): { 
 				reply.Err = ErrWrongLeader
@@ -505,14 +505,15 @@ func (kv *ShardKV) applyConfig(op *Op, msg *raft.ApplyMsg) {
 					//	DPrintf("Server %v at group %v need: %v",  kv.me, kv.gid, i)
 						kv.requiredShards[i] = true	
 					} else {
-						// otherwise i can still serve it
+					// otherwise i can still serve it
 					//	DPrintf("Server %v at group %v still available: %v",  kv.me, kv.gid, i)
 						availableShards[i] = true
-						delete(kv.availableShards, i)
 					}
+					// delete the processed available shards
+					delete(kv.availableShards, i)
 				}
 			}		
-			// old shards
+			// the remaining shards are old shards
 			// I am not responsible for those shards anymore.
 			for shard, _ := range kv.availableShards {
 				kv.oldshards[kv.oldConfig.Num][shard] = true
@@ -541,8 +542,6 @@ func (kv *ShardKV) applyConfig(op *Op, msg *raft.ApplyMsg) {
 			
 			// update the new available shards
 			kv.availableShards = availableShards
-
-			
 		}
 		
 	} 
@@ -568,10 +567,17 @@ func (kv *ShardKV) applyMigration(op *Op, msg *raft.ApplyMsg) {
 		kv.db[op.MigrationReply.Shard][k] = v
 	}
 
-
-	kv.clients[op.MigrationReply.Shard] = make(map[int64]int64)
+	// check the timestamp, be careful
+	//if _, ok := kv.clients[op.MigrationReply.Shard]; !ok { 
+	//	kv.clients[op.MigrationReply.Shard] = make(map[int64]int64)
+	//}
 	for k, v := range op.MigrationReply.Seq {
-		kv.clients[op.MigrationReply.Shard][k] = v
+		timeStamp, ok := kv.clients[op.MigrationReply.Shard][k]
+		if ok && timeStamp > v {
+			kv.clients[op.MigrationReply.Shard][k] = timeStamp
+		} else {
+			kv.clients[op.MigrationReply.Shard][k] = v	
+		}
 	}
 
 	if kv.lastApplied < msg.CommandIndex {
@@ -610,6 +616,7 @@ func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
 		switch op.OpType {
 			case KvOp_Put: {
 				kv.db[hashVal][op.Key] = op.Value
+				op.Err = OK
 				DPrintf("Op seq value:%v PUT(%v, %v)", op.SeqNum, op.Key, op.Value)
 			}
 			case KvOp_Get: {
@@ -626,7 +633,6 @@ func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
 			case KvOp_Append: {
 				val, exists := kv.db[hashVal][op.Key]
 				if exists {
-		
 					kv.db[hashVal][op.Key] = val + op.Value
 					DPrintf("Op seq value:%v Append(%v, %v -> %v) Err (%v)", op.SeqNum, op.Key, val, kv.db[hashVal][op.Key] , op.Err)
 		
@@ -635,7 +641,7 @@ func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
 					DPrintf("Op seq value:%v Append(%v, %v) Err (%v)", op.SeqNum, op.Key, kv.db[hashVal][op.Key] , op.Err)
 		
 				}
-
+				op.Err = OK
 			}
 		}
 		kv.clients[hashVal][op.Id] = op.SeqNum
