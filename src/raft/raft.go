@@ -311,7 +311,6 @@ func (rf *Raft) logTruncate(index int) {
 
 func (rf *Raft) GenerateSnapshot(snapshot []byte, lastApplied int) {
 	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	if lastApplied > rf.lastIncludedIndex {
 		DPrintf("Server %v generate snapshot at index lastApplied %v", rf.me, lastApplied)
 		rf.lastIncludedIndex = lastApplied
@@ -324,10 +323,12 @@ func (rf *Raft) GenerateSnapshot(snapshot []byte, lastApplied int) {
 		e.Encode(rf.log)
 		e.Encode(rf.lastIncludedIndex)
 		e.Encode(rf.lastIncludedTerm)
+		rf.mu.Unlock()
 		state := w.Bytes()
 		rf.persister.SaveStateAndSnapshot(state, snapshot)
+	    return 
 	} 
-	
+	rf.mu.Unlock()
 }
 func (rf *Raft) GetRaftStateSize() int {
 	return rf.persister.RaftStateSize()
@@ -682,6 +683,7 @@ func (rf *Raft) getLastLogInfo() (int, int) {
 	}
 	return lastLogIndex, lastLogTerm
 }
+
 
 func (rf *Raft) StartElection() {
 	
