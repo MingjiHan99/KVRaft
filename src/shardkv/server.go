@@ -10,7 +10,8 @@ import "time"
 import "log"
 import "bytes"
 import "sync/atomic"
-const Debug = 0
+import "fmt"
+const Debug = 1
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug > 0 {
 		log.Printf(format, a...)
@@ -383,14 +384,15 @@ func (kv *ShardKV) pullConfig() {
 			// first condition: add condition here to reduce useless log in Raft
 			// second condition: make sure the migration is completed one by one
 			if cfg.Num == kv.latestConfig().Num + 1 && len(kv.requiredShards) == 0 {
+				kv.mu.Unlock()
 				op := Op {
 					OpType: KvOp_Config,
 					Config: cfg }
 				kv.rf.Start(op)
+			} else {
+				kv.mu.Unlock()
 			}
-			kv.mu.Unlock()
 		}
-
 		time.Sleep(100 * time.Millisecond)
 	}
 }
@@ -402,19 +404,25 @@ func (kv *ShardKV) pullShards() {
 		kv.mu.Lock()
 		if isLeader && len(kv.requiredShards) != 0 {
 			// make a wait group here
+			neededShards := make(map[int]bool)
+			for k, v := range kv.requiredShards {	
+				neededShards[k] = v
+			} 
+            oldConfig := kv.oldConfig.Num
+
+		    kv.mu.Unlock()	
 			
-			DPrintf("Pull shards start")
 			wg := sync.WaitGroup{}
-			wg.Add(len(kv.requiredShards))
-			for k, _ := range kv.requiredShards {
-				// TODO: add pull shards logic
+			wg.Add(len(neededShards))
+			for k, _ := range neededShards {
+			// TODO: add pull shards logic
 				go func (shard int) {
-					gid := kv.oldConfig.Shards[shard]
-					group := kv.oldConfig.Groups[gid]
+					gid := kv.configs[oldConfig].Shards[shard]
+					group := kv.configs[oldConfig].Groups[gid]
 					for i := 0 ; i < len(group); i++ {
 						srv :=kv.make_end(group[i])
 						args := GetMigrationArgs{
-							Num: kv.oldConfig.Num,
+							Num: kv.configs[oldConfig].Num,
 							Shard: shard}
 						
 						reply := GetMigrationReply{
@@ -425,24 +433,17 @@ func (kv *ShardKV) pullShards() {
 						
 						op := Op{
 							OpType: KvOp_Migration,
-							MigrationReply: reply }
-						
+							MigrationReply: reply }	
 						if ok && reply.Err == OK {
-							DPrintf("Server %v at group %v pull shards success %v config  %v ", 
-							kv.me, kv.gid, shard, kv.oldConfig.Num )
 							kv.rf.Start(op)
 							break
-						} else {
-							DPrintf("Server %v at group %v pull shards fail %v config  %v ", 
-							kv.me, kv.gid, shard, kv.oldConfig.Num )
-						}
-						
+						} 	
 					}
 					wg.Done()
 				}(k)
 				
-			}	
-			kv.mu.Unlock()
+			}
+
 			wg.Wait()
 			DPrintf("Pull shards done")
 			// waitgroup done
@@ -451,6 +452,7 @@ func (kv *ShardKV) pullShards() {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	fmt.Println("Thread killed")
 }
 
 
@@ -477,6 +479,8 @@ func (kv *ShardKV) doSnapshot() {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
+
+	fmt.Println("Thread killed")
 }
 
 func (kv *ShardKV) applyConfig(op *Op, msg *raft.ApplyMsg) {
@@ -723,4 +727,6 @@ func (kv *ShardKV) processLog() {
 		} 
 				
 	}
+
+	fmt.Println("Thread killed")
 }

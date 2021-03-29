@@ -59,3 +59,11 @@ type GetMigrationReply struct {
 	Seq map[int64]int64
 	Err Err
 }
+
+type GarbageCollectionArgs struct {
+
+}
+
+type GarbageCOllectionReply struct {
+	
+}
