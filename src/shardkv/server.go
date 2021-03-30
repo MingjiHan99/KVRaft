@@ -40,7 +40,7 @@ type Op struct {
 	Id     int64
 	SeqNum int64
 	Err    Err
-
+    ConfigNumber int
 	MigrationReply GetMigrationReply
 	Config         shardmaster.Config
 }
@@ -117,7 +117,8 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 		Key:    args.Key,
 		Value:  "",
 		Id:     args.Id,
-		SeqNum: args.SeqNum}
+		SeqNum: args.SeqNum,
+	    ConfigNumber: kv.latestConfig().Num }
 
 	index, _, isLeader := kv.rf.Start(op)
 
@@ -190,7 +191,8 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		Key:    args.Key,
 		Value:  args.Value,
 		Id:     args.Id,
-		SeqNum: args.SeqNum}
+		SeqNum: args.SeqNum,
+	    ConfigNumber: kv.latestConfig().Num }
 
 	index, _, isLeader := kv.rf.Start(op)
 	DPrintf("Server %v send Start Request in PutAppend at index %v", kv.me, index)
@@ -617,7 +619,7 @@ func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
 
 	_, shardOk := kv.availableShards[hashVal]
 	// check the shard first
-	if !shardOk {
+	if !shardOk || op.ConfigNumber != kv.latestConfig().Num {
 		op.Err = ErrWrongGroup
 		ch, ok := kv.channels[msg.CommandIndex]
 		delete(kv.channels, msg.CommandIndex)

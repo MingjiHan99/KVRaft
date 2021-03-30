@@ -61,7 +61,10 @@ type GetMigrationReply struct {
 }
 
 type GarbageCollectionArgs struct {
+	Num int  // configuration number
+	Shard int // shard number
 }
 
-type GarbageCOllectionReply struct {
+type GarbageCollectionReply struct {
+	Err Err // OK or Wrong Group
 }
