@@ -29,6 +29,7 @@ type PutAppendArgs struct {
 	// otherwise RPC will break.
 	Id     int64
 	SeqNum int64
+	CfgNum int
 }
 
 type PutAppendReply struct {
@@ -40,6 +41,7 @@ type GetArgs struct {
 	// You'll have to add definitions here.
 	Id     int64
 	SeqNum int64
+	CfgNum int
 }
 
 type GetReply struct {
@@ -61,7 +63,7 @@ type GetMigrationReply struct {
 }
 
 type GarbageCollectionArgs struct {
-	Num int  // configuration number
+	Num   int // configuration number
 	Shard int // shard number
 }
 
