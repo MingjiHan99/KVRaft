@@ -323,10 +323,8 @@ func (rf *Raft) GenerateSnapshot(snapshot []byte, lastApplied int) {
 		e.Encode(rf.log)
 		e.Encode(rf.lastIncludedIndex)
 		e.Encode(rf.lastIncludedTerm)
-		rf.mu.Unlock()
 		state := w.Bytes()
 		rf.persister.SaveStateAndSnapshot(state, snapshot)
-	    return 
 	} 
 	rf.mu.Unlock()
 }
