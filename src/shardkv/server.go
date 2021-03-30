@@ -76,7 +76,7 @@ type ShardKV struct {
 	// config id -> shard id -> seq
 	oldshardsSeq map[int]map[int]map[int64]int64
 	// config id -> shard id
-	garbageList map[int]int
+	garbageList map[int]map[int]bool
 }
 
 // use it with lock, be careful :)
@@ -338,7 +338,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.availableShards = make(map[int]bool)
 	kv.requiredShards = make(map[int]bool)
-
+    kv.garbageList = make(map[int]map[int]bool)
 	// we need to store all old data, and use gc RPC to clean them !!!!
 	kv.oldshards = make(map[int]map[int]bool)
 	kv.oldshardsSeq = make(map[int]map[int]map[int64]int64)
@@ -369,7 +369,8 @@ func (kv *ShardKV) readSnapshotForInit() {
 			d.Decode(&kv.oldshards) != nil ||
 			d.Decode(&kv.requiredShards) != nil ||
 			d.Decode(&kv.oldshardsData) != nil ||
-			d.Decode(&kv.oldshardsSeq) != nil {
+			d.Decode(&kv.oldshardsSeq) != nil ||
+			d.Decode(&kv.garbageList) != nil {
 
 			log.Fatalf("Unable to read persisted snapshot")
 		}
@@ -469,6 +470,7 @@ func (kv *ShardKV) createSnapshot() {
 	e.Encode(kv.requiredShards)
 	e.Encode(kv.oldshardsData)
 	e.Encode(kv.oldshardsSeq)
+	e.Encode(kv.garbageList)
 	data := w.Bytes()
 	lastApplied := kv.lastApplied
 	DPrintf("Server %v at group %v generates snapshot at log intex %v", kv.me, kv.gid, lastApplied)
@@ -610,7 +612,10 @@ func (kv *ShardKV) applyMigration(op *Op, msg *raft.ApplyMsg) {
 	if kv.lastApplied < msg.CommandIndex {
 		kv.lastApplied = msg.CommandIndex
 	}
-
+    if _, ok := kv.garbageList[op.MigrationReply.Num]; !ok {
+		kv.garbageList[op.MigrationReply.Num] = make(map[int]bool)
+	}
+    kv.garbageList[op.MigrationReply.Num][op.MigrationReply.Shard] = true
     
 }
 
@@ -714,7 +719,8 @@ func (kv *ShardKV) applySnapshot(msg *raft.ApplyMsg) {
 		d.Decode(&kv.oldshards) != nil ||
 		d.Decode(&kv.requiredShards) != nil ||
 		d.Decode(&kv.oldshardsData) != nil ||
-		d.Decode(&kv.oldshardsSeq) != nil {
+		d.Decode(&kv.oldshardsSeq) != nil ||
+		d.Decode(&kv.garbageList) != nil {
 
 		log.Fatalf("Unable to read persisted snapshot")
 	}
@@ -747,6 +753,6 @@ func (kv *ShardKV) processLog() {
 
 func (kv *ShardKV) sendGCRequest() {
     for !kv.killed() {
-
+     
 	}
 }
