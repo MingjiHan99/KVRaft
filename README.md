@@ -7,8 +7,9 @@ The labs of course MIT 6.824 2020.
 - [x] MapReduce
 - [x] Raft 
 - [x] KV Storage Over Raft
-- [ ] Shared KV Storage Over Raft
-
+- [x] Shared KV Storage Over Raft
+- [ ] Chanllenge 1
+- [x] Chanllenge 2
 #### Ideas
 
 1. MapReduce: Following the MapReduce paper is ok
