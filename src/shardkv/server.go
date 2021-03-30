@@ -746,5 +746,7 @@ func (kv *ShardKV) processLog() {
 }
 
 func (kv *ShardKV) sendGCRequest() {
+    for !kv.killed() {
 
+	}
 }
