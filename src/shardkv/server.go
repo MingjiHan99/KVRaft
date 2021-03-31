@@ -23,11 +23,12 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 type KvOp int32
 
 const (
-	KvOp_Get       KvOp = 0
-	KvOp_Put       KvOp = 1
-	KvOp_Append    KvOp = 2
-	KvOp_Config    KvOp = 3
-	KvOp_Migration KvOp = 4
+	KvOp_Get               KvOp = 0
+	KvOp_Put               KvOp = 1
+	KvOp_Append            KvOp = 2
+	KvOp_Config            KvOp = 3
+	KvOp_Migration         KvOp = 4
+	KvOp_GarbageCollection KvOp = 5
 )
 
 type Op struct {
@@ -43,6 +44,8 @@ type Op struct {
 	ConfigNumber   int
 	MigrationReply GetMigrationReply
 	Config         shardmaster.Config
+	GCNum          int
+	GCShard        int
 }
 
 type ShardKV struct {
@@ -91,7 +94,7 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	hashVal := key2shard(args.Key)
 	_, isLeader := kv.rf.GetState()
 	_, shardOk := kv.availableShards[hashVal]
-	if isLeader && (args.CfgNum != kv.latestConfig().Num || !shardOk)  {
+	if isLeader && (args.CfgNum != kv.latestConfig().Num || !shardOk) {
 		reply.Err = ErrWrongGroup
 		kv.mu.Unlock()
 		return
@@ -168,7 +171,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.mu.Unlock()
 		return
 	}
-	
+
 	seq, ok := kv.clients[hashVal][args.Id]
 	if isLeader && ok && seq >= args.SeqNum {
 		reply.Err = OK
@@ -338,7 +341,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 
 	kv.availableShards = make(map[int]bool)
 	kv.requiredShards = make(map[int]bool)
-    kv.garbageList = make(map[int]map[int]bool)
+	kv.garbageList = make(map[int]map[int]bool)
 	// we need to store all old data, and use gc RPC to clean them !!!!
 	kv.oldshards = make(map[int]map[int]bool)
 	kv.oldshardsSeq = make(map[int]map[int]map[int64]int64)
@@ -351,7 +354,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	go kv.pullShards()
 	go kv.pullConfig()
 	go kv.processLog()
-
+    go kv.sendGCRequest()
 	return kv
 }
 
@@ -473,7 +476,7 @@ func (kv *ShardKV) createSnapshot() {
 	e.Encode(kv.garbageList)
 	data := w.Bytes()
 	lastApplied := kv.lastApplied
-	DPrintf("Server %v at group %v generates snapshot at log intex %v", kv.me, kv.gid, lastApplied)
+//	DPrintf("Server %v at group %v generates snapshot at log intex %v", kv.me, kv.gid, lastApplied)
 	kv.rf.GenerateSnapshot(data, lastApplied)
 }
 
@@ -483,9 +486,9 @@ func (kv *ShardKV) doSnapshot() {
 			kv.mu.Lock()
 			kv.createSnapshot()
 			kv.mu.Unlock()
-		
+
 		}
-		time.Sleep(150 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 
 	fmt.Println("Thread killed")
@@ -576,8 +579,7 @@ func (kv *ShardKV) applyConfig(op *Op, msg *raft.ApplyMsg) {
 	if kv.lastApplied < msg.CommandIndex {
 		kv.lastApplied = msg.CommandIndex
 	}
-	
-    
+
 }
 
 func (kv *ShardKV) applyMigration(op *Op, msg *raft.ApplyMsg) {
@@ -612,15 +614,39 @@ func (kv *ShardKV) applyMigration(op *Op, msg *raft.ApplyMsg) {
 	if kv.lastApplied < msg.CommandIndex {
 		kv.lastApplied = msg.CommandIndex
 	}
-    if _, ok := kv.garbageList[op.MigrationReply.Num]; !ok {
+	if _, ok := kv.garbageList[op.MigrationReply.Num]; !ok {
 		kv.garbageList[op.MigrationReply.Num] = make(map[int]bool)
 	}
-    kv.garbageList[op.MigrationReply.Num][op.MigrationReply.Shard] = true
-    
+	kv.garbageList[op.MigrationReply.Num][op.MigrationReply.Shard] = true
+
 }
 
-func (kv *ShardKV) applyGarbageCollection() {
-	// TODO
+func (kv *ShardKV) applyGarbageCollection(op *Op, msg *raft.ApplyMsg) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	needClean := true
+	oldConfig, configOK := kv.oldshards[op.GCNum]
+	if !configOK {
+		needClean = false
+	}
+
+	_, shardOK := oldConfig[op.GCShard]
+
+	if !shardOK {
+		needClean = false
+	}
+
+	if needClean {
+		DPrintf("Server %v at group %v GC CLEAN config %v shard %v\n", kv.me, kv.gid, op.GCNum, op.GCShard)
+		delete(kv.oldshards[op.GCNum], op.GCShard)
+		delete(kv.oldshardsData[op.GCNum], op.GCShard)
+		delete(kv.oldshardsSeq[op.GCNum], op.GCShard)
+	}
+
+	if kv.lastApplied < msg.CommandIndex {
+		kv.lastApplied = msg.CommandIndex
+	}
+
 }
 
 func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
@@ -673,8 +699,8 @@ func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
 				val, exists := kv.db[hashVal][op.Key]
 				if exists {
 					kv.db[hashVal][op.Key] = val + op.Value
-					DPrintf("Server %v at group %v config %v shard %v Op seq value:%v Append(%v, %v -> %v) Err (%v) client : %v", 
-					kv.me, kv.gid, kv.latestConfig().Num, hashVal, op.SeqNum, op.Key, val, kv.db[hashVal][op.Key], op.Err, op.Id)
+					DPrintf("Server %v at group %v config %v shard %v Op seq value:%v Append(%v, %v -> %v) Err (%v) client : %v",
+						kv.me, kv.gid, kv.latestConfig().Num, hashVal, op.SeqNum, op.Key, val, kv.db[hashVal][op.Key], op.Err, op.Id)
 
 				} else {
 					kv.db[hashVal][op.Key] = op.Value
@@ -697,7 +723,7 @@ func (kv *ShardKV) applyUserRequest(op *Op, msg *raft.ApplyMsg) {
 		_, isLeader := kv.rf.GetState()
 		if ok && isLeader {
 			ch <- *op
-		}	
+		}
 		return
 	}
 	kv.mu.Unlock()
@@ -738,6 +764,8 @@ func (kv *ShardKV) processLog() {
 				kv.applyConfig(&op, &msg)
 			case KvOp_Migration:
 				kv.applyMigration(&op, &msg)
+			case KvOp_GarbageCollection:
+				kv.applyGarbageCollection(&op, &msg)
 			default:
 				kv.applyUserRequest(&op, &msg)
 			}
@@ -752,7 +780,92 @@ func (kv *ShardKV) processLog() {
 }
 
 func (kv *ShardKV) sendGCRequest() {
-    for !kv.killed() {
-     
+	for !kv.killed() {
+		kv.mu.Lock()
+		
+		list := []GarbageCollectionArgs{
+
+		}
+
+		for cfgid, shards := range kv.garbageList {
+			for shard, _ := range shards {
+				list = append(list, GarbageCollectionArgs{
+					Num: cfgid,
+					Shard: shard})
+			}
+		}
+
+		kv.mu.Unlock()
+       
+		wg := sync.WaitGroup{
+		}
+		wg.Add(len(list))
+ 
+		for i := 0; i < len(list); i++ {
+
+            go func(args GarbageCollectionArgs) {
+				gid := kv.configs[args.Num].Shards[args.Shard]
+				group := kv.configs[args.Num].Groups[gid]
+				for i := 0; i < len(group); i++ {
+					clk := kv.make_end(group[i])
+					reply := GarbageCollectionReply {
+
+					}
+					ok := clk.Call("ShardKV.GarbageCollectionRPC", &args, &reply)
+					if ok  {
+						if reply.Err == OK {
+						    delete(kv.garbageList[args.Num], args.Shard)
+						
+							break
+						} else if reply.Err == Deleting {
+							break
+						}
+					}				
+				}
+				wg.Done()					
+			}(list[i])
+		}
+		wg.Wait()
+		time.Sleep(50 * time.Millisecond)
+	} 
+}
+
+func (kv *ShardKV) GarbageCollectionRPC(args *GarbageCollectionArgs, reply *GarbageCollectionReply) {
+	kv.mu.Lock()
+	oldConfig, configOK := kv.oldshards[args.Num]
+
+	if !configOK {
+		reply.Err = OK
+
+	 DPrintf("Server %v at group %v clean gc rpc config %v shard %v: reply :ok (%v)", kv.me, kv.gid, args.Num, args.Shard, reply.Err)
+		kv.mu.Unlock()
+		return
 	}
+
+	_, shardOK := oldConfig[args.Shard]
+
+	if !shardOK {
+		reply.Err = OK
+
+	 DPrintf("Server %v at group %v clean gc rpc config %v shard %v: reply :ok (%v)", kv.me, kv.gid, args.Num, args.Shard, reply.Err)
+		kv.mu.Unlock()
+		return
+	}
+
+	op := Op{
+		OpType:  KvOp_GarbageCollection,
+		GCNum:   args.Num,
+		GCShard: args.Shard}
+	kv.mu.Unlock()
+
+	_, _, isLeader := kv.rf.Start(op)
+	if isLeader {
+
+		reply.Err = Deleting
+	 DPrintf("Server %v at group %v clean gc rpc config %v shard %v: reply :deleting (%v)", kv.me, kv.gid, args.Num, args.Shard, reply.Err)
+		return 
+	} 
+
+	reply.Err = ErrWrongLeader
+	 DPrintf("Server %v at group %v clean gc rpc config %v shard %v: reply : wrongleader (%v)", kv.me, kv.gid, args.Num, args.Shard, reply.Err)
 }
