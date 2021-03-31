@@ -8,7 +8,7 @@ The labs of course MIT 6.824 2020.
 - [x] Raft 
 - [x] KV Storage Over Raft
 - [x] Shared KV Storage Over Raft
-- [ ] Chanllenge 1
+- [x] Chanllenge 1
 - [x] Chanllenge 2
 #### Ideas
 
